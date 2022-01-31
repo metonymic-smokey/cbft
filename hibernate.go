@@ -123,7 +123,7 @@ func HibernateEndpoint(mgr *cbgt.Manager, bindHTTP string) error {
 		NsStatsSampleInterval: 10 * time.Second,
 	}
 
-	resCh, err := startNsMonitor(url, nsStatsSample, *options, mgr)
+	resCh, err := startNsMonitor(url, nsStatsSample, *options)
 	if err != nil {
 		log.Printf("start ns monitor error")
 		return errors.Wrapf(err, "error starting NSMonitor")
@@ -143,7 +143,7 @@ func HibernateEndpoint(mgr *cbgt.Manager, bindHTTP string) error {
 }
 
 func startNsMonitor(url string, sampleCh chan NsStatsSample,
-	options NsStatsOptions, mgr *cbgt.Manager) (*MonitorNsStats, error) {
+	options NsStatsOptions) (*MonitorNsStats, error) {
 	n := &MonitorNsStats{
 		url:      url,
 		sampleCh: sampleCh,
@@ -151,12 +151,12 @@ func startNsMonitor(url string, sampleCh chan NsStatsSample,
 		stopCh:   make(chan struct{}),
 	}
 
-	go n.runNode(url, mgr)
+	go n.runNode(url)
 
 	return n, nil
 }
 
-func (n *MonitorNsStats) runNode(url string, mgr *cbgt.Manager) {
+func (n *MonitorNsStats) runNode(url string) {
 	NsStatsSampleInterval := n.options.NsStatsSampleInterval
 	if NsStatsSampleInterval <= 0 {
 		NsStatsSampleInterval =
@@ -175,7 +175,7 @@ func (n *MonitorNsStats) runNode(url string, mgr *cbgt.Manager) {
 			if !ok {
 				return
 			}
-			n.sample(url, t, mgr)
+			n.sample(url, t)
 		}
 	}
 }
@@ -184,8 +184,7 @@ func (n *MonitorNsStats) Stop() {
 	close(n.stopCh)
 }
 
-func (n *MonitorNsStats) sample(url string, start time.Time,
-	mgr *cbgt.Manager) {
+func (n *MonitorNsStats) sample(url string, start time.Time) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		log.Printf("request error: %s", err.Error())
