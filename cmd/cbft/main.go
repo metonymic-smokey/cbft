@@ -758,7 +758,7 @@ func mainStart(cfg cbgt.Cfg, uuid string, tags []string, container string,
 
 	go runBleveExpvarsCooker(mgr)
 
-	cbft.HibernateEndpoint(mgr, bindHTTP)
+	cbft.IndexHibernateProbe(mgr, bindHTTP)
 
 	return router, err
 }

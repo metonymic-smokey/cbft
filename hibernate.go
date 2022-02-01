@@ -4,21 +4,22 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/couchbase/cbgt"
 	log "github.com/couchbase/clog"
 
-	jp "github.com/dustin/go-jsonpointer"
+	jp "github.com/buger/jsonparser"
 	"github.com/pkg/errors"
 )
 
-const DefaultNsStatsSampleIntervalSecs = 30
+const DefaultIndexActivityStatsSampleIntervalSecs = 30
 const LastAccessedTime = "last_access_time"
 
-type NsStatsSample struct {
+// IndexActivityStats is a struct holding statistics about
+// search indexes.
+type indexActivityStats struct {
 	Url      string        // Ex: "http://10.0.0.1:8095".
 	Start    time.Time     // When we started to get this sample.
 	Duration time.Duration // How long it took to get this sample.
@@ -26,52 +27,53 @@ type NsStatsSample struct {
 	Data     []byte // response from the endpoint.
 }
 
-type NsStatsOptions struct {
-	NsStatsSampleInterval time.Duration
+// indexActivityStatsOptions holds options about configuring
+// the polling of search indexes' stats.
+type indexActivityStatsOptions struct {
+	indexActivityStatsSampleInterval time.Duration
 }
 
-type MonitorNsStats struct {
-	url      string // REST URL to monitor
-	sampleCh chan NsStatsSample
-	options  NsStatsOptions
-	stopCh   chan struct{}
+// MonitorIndexActivityStats is used to monitor index activity
+// stats for a specific URL.
+type MonitorIndexActivityStats struct {
+	URL      string // REST URL to monitor
+	SampleCh chan indexActivityStats
+	Options  indexActivityStatsOptions
+	StopCh   chan struct{}
 }
 
-// Ref: https://stackoverflow.com/questions/31480710/validate-url-with-standard-package-in-go
-func isValidURL(URL string) bool {
-	u, err := url.Parse(URL)
-	return err == nil && u.Scheme != "" && u.Host != ""
+// IndividualIndexActivityStats holds acitivity stats
+// ns each individual index.
+type individualIndexActivityStats struct {
+	LastAccessedTime time.Time
 }
 
-// NsStats for each index.
-type NsIndexStats struct {
-	LastAccessedTime string
-	// temporarily set the type as string since until the first
-	// access, the value is "", which results in an error while
-	// converting to date-time
-}
-
-//  Unmarshals /nsstats and returns the relevant stats in a struct
+// Unmarshals /nsstats and returns the relevant stats in a struct
 // Currently, only returns the last_access_time for each index.
-func unmarshalNsStats(data []byte, mgr *cbgt.Manager) (map[string]NsIndexStats, error) {
-	result := make(map[string]NsIndexStats)
-	cfg := mgr.Cfg()
-	indexDefs, _, err := cbgt.CfgGetIndexDefs(cfg)
+func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager) (map[string]individualIndexActivityStats, error) {
+	result := make(map[string]individualIndexActivityStats)
+	indexDefs, _, err := mgr.GetIndexDefs(true)
 	if err != nil {
-		log.Printf("error getting index defs")
 		return result, errors.Wrapf(err, "error getting index defs")
 	}
 	for _, index := range indexDefs.IndexDefs {
 		bucketName := index.SourceName
 		indexName := index.Name
-		path := "/" + bucketName + ":" + indexName + ":" + LastAccessedTime
-		resByte, err := jp.Find(data, path)
+		path := bucketName + ":" + indexName + ":" + LastAccessedTime
+		resByte, _, _, err := jp.Get(data, path)
 		if err != nil {
-			log.Printf("err: %e", err)
 			return result, errors.Wrapf(err, "error extracting data from response")
 		}
-		result[indexName] = NsIndexStats{
-			LastAccessedTime: string(resByte),
+		stringRes := string(resByte)
+		if stringRes != "" {
+			resTime, err := time.Parse(time.RFC3339, stringRes)
+			if err != nil {
+				log.Printf("Hibernate: error parsing result into time format: %e", err)
+			} else {
+				result[indexName] = individualIndexActivityStats{
+					LastAccessedTime: resTime,
+				}
+			}
 		}
 	}
 	return result, nil
@@ -83,7 +85,6 @@ func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
 
 	nodeDefs, _, err := cbgt.CfgGetNodeDefs(cfg, cbgt.NODE_DEFS_KNOWN)
 	if err != nil {
-		log.Printf("Error getting nodedefs: %s", err.Error())
 		return "", errors.Wrapf(err, "Error getting nodedefs")
 	}
 	if nodeDefs == nil {
@@ -104,51 +105,54 @@ func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
 		// request error: parse 192.168.1.6:9200/api/nsstats: first path segment in URL cannot contain colon
 		// Ref: https://stackoverflow.com/questions/54392948/first-path-segment-in-url-cannot-contain-colon
 		fqdnURL = strings.Trim(fqdnURL, "\n")
-		log.Printf("FQDN URL: %s", fqdnURL)
-		if isValidURL(fqdnURL) {
-			return fqdnURL, nil
-		}
+		// possibly check node health here?
+		// return only if node is healthy?
+		return fqdnURL, nil
 	}
 	return "", nil
 }
 
-func HibernateEndpoint(mgr *cbgt.Manager, bindHTTP string) error {
+// IndexHibernateProbe monitors an index's activity.
+func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
 	url, err := getNsStatsURL(mgr, bindHTTP)
 	if err != nil {
-		return errors.Wrapf(err, "error getting /nsstats endpoint URL")
+		return errors.Wrapf(err, "Error getting /nsstats endpoint URL")
 	}
 
-	nsStatsSample := make(chan NsStatsSample)
-	options := &NsStatsOptions{
-		NsStatsSampleInterval: 10 * time.Second,
+	indexActivityStatsSample := make(chan indexActivityStats)
+	options := &indexActivityStatsOptions{
+		indexActivityStatsSampleInterval: 10 * time.Second,
 	}
 
-	resCh, err := startNsMonitor(url, nsStatsSample, *options)
+	resCh, err := startIndexActivityMonitor(url, indexActivityStatsSample, *options)
 	if err != nil {
-		log.Printf("start ns monitor error")
-		return errors.Wrapf(err, "error starting NSMonitor")
+		return errors.Wrapf(err, "Error starting NSMonitor")
 	}
 	go func() {
-		for r := range resCh.sampleCh {
-			result, err := unmarshalNsStats(r.Data, mgr)
+		for r := range resCh.SampleCh {
+			result, err := unmarshalIndexActivityStats(r.Data, mgr)
 			if err != nil {
-				log.Printf("error unmarshalling stats: %e", err)
-				return err
+				log.Printf("Hibernate: Error unmarshalling stats: %e", err)
+				continue
+				// should continue even if unmarshalling does not
+				// work for one endpoint.
 			}
-			log.Printf("Result: %+v", result)
+			log.Printf("Hibernate: Result: %+v", result)
 		}
 	}()
 
 	return err
 }
 
-func startNsMonitor(url string, sampleCh chan NsStatsSample,
-	options NsStatsOptions) (*MonitorNsStats, error) {
-	n := &MonitorNsStats{
-		url:      url,
-		sampleCh: sampleCh,
-		options:  options,
-		stopCh:   make(chan struct{}),
+// startIndexActivityMonitor starts a goroutine to monitor a URL and returns
+// the stats from polling that URL.
+func startIndexActivityMonitor(url string, sampleCh chan indexActivityStats,
+	options indexActivityStatsOptions) (*MonitorIndexActivityStats, error) {
+	n := &MonitorIndexActivityStats{
+		URL:      url,
+		SampleCh: sampleCh,
+		Options:  options,
+		StopCh:   make(chan struct{}),
 	}
 
 	go n.runNode(url)
@@ -156,22 +160,24 @@ func startNsMonitor(url string, sampleCh chan NsStatsSample,
 	return n, nil
 }
 
-func (n *MonitorNsStats) runNode(url string) {
-	NsStatsSampleInterval := n.options.NsStatsSampleInterval
-	if NsStatsSampleInterval <= 0 {
-		NsStatsSampleInterval =
-			DefaultNsStatsSampleIntervalSecs * time.Second
+// runNode polls a specific URL at given intervals, gathering
+// stats for a specific node.
+func (n *MonitorIndexActivityStats) runNode(url string) {
+	IndexActivityStatsSampleInterval := n.Options.indexActivityStatsSampleInterval
+	if IndexActivityStatsSampleInterval <= 0 {
+		IndexActivityStatsSampleInterval =
+			DefaultIndexActivityStatsSampleIntervalSecs * time.Second
 	}
 
-	NsStatsTicker := time.NewTicker(NsStatsSampleInterval)
+	indexActivityStatsTicker := time.NewTicker(IndexActivityStatsSampleInterval)
 	// want this to be continuously polled, hence not stopped.
 
 	for {
 		select {
-		case <-n.stopCh:
+		case <-n.StopCh:
 			return
 
-		case t, ok := <-NsStatsTicker.C:
+		case t, ok := <-indexActivityStatsTicker.C:
 			if !ok {
 				return
 			}
@@ -180,14 +186,16 @@ func (n *MonitorNsStats) runNode(url string) {
 	}
 }
 
-func (n *MonitorNsStats) Stop() {
-	close(n.stopCh)
+func (n *MonitorIndexActivityStats) Stop() {
+	close(n.StopCh)
 }
 
-func (n *MonitorNsStats) sample(url string, start time.Time) {
+// sample makes a GET request to a URL and populates a
+// channel with the raw byte data.
+func (n *MonitorIndexActivityStats) sample(url string, start time.Time) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		log.Printf("request error: %s", err.Error())
+		log.Printf("Hibernate: Request error: %s", err.Error())
 		return
 	}
 
@@ -195,7 +203,7 @@ func (n *MonitorNsStats) sample(url string, start time.Time) {
 	client := cbgt.HttpClient()
 	res, err := client.Do(req)
 	if err != nil {
-		log.Printf("response error: %s", err.Error())
+		log.Printf("Hibernate: Response error: %s", err.Error())
 		res.Body.Close()
 		// closing here since defer will not apply on a premature return
 		return
@@ -213,17 +221,17 @@ func (n *MonitorNsStats) sample(url string, start time.Time) {
 				err = dataErr
 			}
 		} else {
-			err = fmt.Errorf("nodes: sample res.StatusCode not 200,"+
+			err = fmt.Errorf("hibernate: sample res.StatusCode not 200,"+
 				" res: %#v, url: %#v, err: %v",
 				res, url, err)
 		}
 	} else {
-		err = fmt.Errorf("nodes: sample,"+
+		err = fmt.Errorf("hibernate: sample,"+
 			" res: %#v, url: %#v, err: %v",
 			res, url, err)
 	}
 
-	finalNsStatsSample := NsStatsSample{
+	finalIndexActivityStatsSample := indexActivityStats{
 		Url:      url,
 		Duration: duration,
 		Error:    err,
@@ -232,7 +240,7 @@ func (n *MonitorNsStats) sample(url string, start time.Time) {
 	}
 
 	select {
-	case <-n.stopCh:
-	case n.sampleCh <- finalNsStatsSample:
+	case <-n.StopCh:
+	case n.SampleCh <- finalIndexActivityStatsSample:
 	}
 }
