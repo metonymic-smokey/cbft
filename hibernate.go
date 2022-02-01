@@ -17,6 +17,14 @@ import (
 const DefaultIndexActivityStatsSampleIntervalSecs = 30
 const LastAccessedTime = "last_access_time"
 
+var DefaultDoFunc = func(client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return &http.Response{}, err
+	}
+	return resp, nil
+}
+
 // IndexActivityStats is a struct holding statistics about
 // search indexes.
 type indexActivityStats struct {
@@ -27,10 +35,15 @@ type indexActivityStats struct {
 	Data     []byte // response from the endpoint.
 }
 
+type doFunc func(*http.Client, *http.Request) (*http.Response, error)
+
 // indexActivityStatsOptions holds options about configuring
 // the polling of search indexes' stats.
 type indexActivityStatsOptions struct {
 	indexActivityStatsSampleInterval time.Duration
+	// The Do field is a function that will execute a HTTP request.
+	// Added for unit testing.
+	Do doFunc
 }
 
 // MonitorIndexActivityStats is used to monitor index activity
@@ -168,6 +181,9 @@ func (n *MonitorIndexActivityStats) runNode(url string) {
 		IndexActivityStatsSampleInterval =
 			DefaultIndexActivityStatsSampleIntervalSecs * time.Second
 	}
+	if n.Options.Do == nil {
+		n.Options.Do = DefaultDoFunc
+	}
 
 	indexActivityStatsTicker := time.NewTicker(IndexActivityStatsSampleInterval)
 	// want this to be continuously polled, hence not stopped.
@@ -201,14 +217,18 @@ func (n *MonitorIndexActivityStats) sample(url string, start time.Time) {
 
 	// res, err := http.Get(url) //don't use http.Get  - no default timeout
 	client := cbgt.HttpClient()
-	res, err := client.Do(req)
+	res, err := n.Options.Do(client, req)
 	if err != nil {
 		log.Printf("Hibernate: Response error: %s", err.Error())
-		res.Body.Close()
+		if res.Body != nil {
+			res.Body.Close()
+		}
 		// closing here since defer will not apply on a premature return
 		return
 	}
-	defer res.Body.Close()
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
 	duration := time.Since(start)
 
 	data := []byte{}
