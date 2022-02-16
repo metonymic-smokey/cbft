@@ -58,7 +58,68 @@ type MonitorIndexActivityStats struct {
 // IndividualIndexActivityStats holds acitivity stats
 // ns each individual index.
 type individualIndexActivityStats struct {
-	LastAccessedTime time.Time
+	LastAccessedTime time.Time `json:"last_accessed_time"`
+}
+
+// separate struct for hibernation policy - last access time, and actions to take
+// buffered channel - push Result into channel?
+// analyse stats from results and apply hibernation policies
+func updateHibernationStatus(mgr *cbgt.Manager,
+	result map[string]individualIndexActivityStats) error {
+	// indexDefs, cas, err := mgr.GetIndexDefs(true) - cannot do this since cas needed later on
+	cfg := mgr.Cfg()
+	indexDefs, cas, err := cbgt.CfgGetIndexDefs(cfg)
+	if err != nil {
+		return errors.Wrapf(err, "hibernate: error getting index defs:")
+	}
+
+	// pass index defs and results map to a func(which will return updated index defs)
+	// in that func, get criteria and action for the hib policy
+	// for each index name, check the value of last_accessed_time in resultsMap
+	// if warm, pass that index to updateIndexDef(warm); similarly for cold
+	// return the index defs to this function
+
+	changed := updateIndexStatus(mgr, indexDefs, result)
+
+	if changed {
+		// need to set indexDefs here since indexControl() fetches them from Cfg
+		_, err = cbgt.CfgSetIndexDefs(cfg, indexDefs, cas)
+		if err != nil {
+			return errors.Wrapf(err, "error setting index defs")
+		}
+		// locks not required here since Set uses locks internally.
+
+		// now need to get updated index defs
+		indexDefs, _, err = cbgt.CfgGetIndexDefs(cfg)
+		if err != nil {
+			return errors.Wrapf(err, "error getting updated index defs")
+		}
+		// without the above steps, extra restart issue resurfaces
+
+		applyHibernationPolicies(mgr, indexDefs)
+	}
+	return err
+}
+
+func applyHibernationPolicies(mgr *cbgt.Manager, indexDefs *cbgt.IndexDefs) {
+	for _, index := range indexDefs.IndexDefs {
+		indexName := index.Name
+		indexUUID := index.UUID
+		// check for phase change here
+		if index.HibernateStatus == cbgt.Cold {
+			// checking if it's getting set for the right index
+			log.Printf("cold index control: name: %s,uuid: %s", indexName, indexUUID)
+			mgr.IndexControl(indexName, indexUUID, "", "pause", "freeze") //pause writing
+		} else if index.HibernateStatus == cbgt.Warm {
+			log.Printf("warm index control: name: %s,uuid: %s", indexName, indexUUID)
+			mgr.IndexControl(indexName, indexUUID, "", "resume", "freeze") //resume writing
+		} else if index.HibernateStatus == cbgt.Hot {
+			log.Printf("index control: name: %s,uuid: %s", indexName, indexUUID)
+			mgr.IndexControl(indexName, indexUUID, "", "resume", "unfreeze") //resume writing
+		}
+	}
+	// not needed to explicitly run cfgsetindexdefs since IndexControl()
+	// changes it
 }
 
 // Unmarshals /nsstats and returns the relevant stats in a struct
@@ -69,22 +130,24 @@ func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager) (map[string]ind
 	if err != nil {
 		return result, errors.Wrapf(err, "error getting index defs")
 	}
-	for _, index := range indexDefs.IndexDefs {
-		bucketName := index.SourceName
-		indexName := index.Name
-		path := bucketName + ":" + indexName + ":" + LastAccessedTime
-		resByte, _, _, err := jp.Get(data, path)
-		if err != nil {
-			return result, errors.Wrapf(err, "error extracting data from response")
-		}
-		stringRes := string(resByte)
-		if stringRes != "" {
-			resTime, err := time.Parse(time.RFC3339, stringRes)
+	if indexDefs != nil {
+		for _, index := range indexDefs.IndexDefs {
+			bucketName := index.SourceName
+			indexName := index.Name
+			path := bucketName + ":" + indexName + ":" + LastAccessedTime
+			resByte, _, _, err := jp.Get(data, path)
 			if err != nil {
-				log.Printf("Hibernate: error parsing result into time format: %e", err)
-			} else {
-				result[indexName] = individualIndexActivityStats{
-					LastAccessedTime: resTime,
+				return result, errors.Wrapf(err, "error extracting data from response")
+			}
+			stringRes := string(resByte)
+			if stringRes != "" {
+				resTime, err := time.Parse(time.RFC3339, stringRes)
+				if err != nil {
+					log.Printf("Hibernate: error parsing result into time format: %e", err)
+				} else {
+					result[indexName] = individualIndexActivityStats{
+						LastAccessedTime: resTime,
+					}
 				}
 			}
 		}
@@ -150,7 +213,8 @@ func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
 				// should continue even if unmarshalling does not
 				// work for one endpoint.
 			}
-			log.Printf("Hibernate: Result: %+v", result)
+			//log.Printf("Hibernate: Result: %+v", result)
+			go updateHibernationStatus(mgr, result)
 		}
 	}()
 
