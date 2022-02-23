@@ -2704,9 +2704,9 @@ type PartitionSelectionStrategy string
 
 var FetchBleveTargets = func(mgr *cbgt.Manager, indexName, indexUUID string,
 	planPIndexFilterName string, partitionSelection PartitionSelectionStrategy) (
-	[]*cbgt.PIndex, []*cbgt.RemotePlanPIndex, []string, error) {
+	[]*cbgt.PIndex, []*cbgt.RemotePlanPIndex, []string, []*cbgt.PIndex, error) {
 	if mgr == nil {
-		return nil, nil, nil, fmt.Errorf("manager not defined")
+		return nil, nil, nil, nil, fmt.Errorf("manager not defined")
 	}
 
 	return mgr.CoveringPIndexesEx(cbgt.CoveringPIndexesSpec{
@@ -2732,7 +2732,7 @@ func bleveIndexTargets(mgr *cbgt.Manager, indexName, indexUUID string,
 		partitionSelection = "local"
 	}
 
-	localPIndexesAll, remotePlanPIndexes, missingPIndexNames, err :=
+	localPIndexesAll, remotePlanPIndexes, missingPIndexNames, hibernatedPIndexes, err :=
 		FetchBleveTargets(mgr, indexName, indexUUID,
 			planPIndexFilterName, PartitionSelectionStrategy(partitionSelection))
 	if err != nil {
@@ -2777,6 +2777,16 @@ func bleveIndexTargets(mgr *cbgt.Manager, indexName, indexUUID string,
 		}
 	}
 
+	// add pindexes of hibernated indexes to collector too
+	if len(hibernatedPIndexes) > 0 {
+		for _, hp := range hibernatedPIndexes {
+			collector.Add(&HibernatedPIndex{
+				name:   hp.Name,
+				pindex: hp,
+				mgr:    mgr,
+			})
+		}
+	}
 	remoteClients, err := rcAdder(mgr, indexName, indexUUID,
 		remotePlanPIndexes, consistencyParams, onlyPIndexes,
 		collector, groupByNode)
