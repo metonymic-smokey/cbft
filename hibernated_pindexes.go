@@ -64,44 +64,35 @@ func (m *HibernatedPIndex) Search(req *bleve.SearchRequest) (
 
 func (m *HibernatedPIndex) SearchInContext(ctx context.Context,
 	req *bleve.SearchRequest) (*bleve.SearchResult, error) {
-	log.Printf("hib pindexes: in searchincontext...")
 	// trial - here since existing indexes will be 'bleve opened' on startup.
 	// can consider removing this once cold indexes are not 'bleve opened' on start
 	err := m.pindex.Close(false)
 	if err != nil {
-		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s", err.Error())
+		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s",
+			err.Error())
 	}
 
-	restart := func() {} // just for trial
 	bleveParams := NewBleveParams()
 	kvConfig, _, _ := bleveRuntimeConfigMap(bleveParams)
 	kvConfig["read_only"] = true
 	log.Printf("hib pindexes: start open using: %s", m.pindex.Path)
 	bindex, err := bleve.OpenUsing(m.pindex.Path, kvConfig)
 	if err != nil {
-		return nil, fmt.Errorf("hib pindexes: err opening pindex path: %s", err.Error())
-	}
-	// need to initialise the bleve-related parameters to avoid a nil bindex
-	m.pindex.Impl = bindex
-	m.pindex.Dest = &cbgt.DestForwarder{
-		DestProvider: NewBleveDest(m.pindex.Path, bindex, restart, bleveParams.DocConfig),
+		return nil, fmt.Errorf("hib pindexes: err opening pindex path: %s",
+			err.Error())
 	}
 	log.Printf("hib pindexes: finished open using: %s", m.pindex.Path)
 
 	// call search in context using bindex
 	searchResult, err := bindex.SearchInContext(ctx, req)
 	if err != nil {
-		return searchResult, fmt.Errorf("hib pindexes: error searching : %s", err.Error())
-	}
-	// works with only stopPIndex() for a new index
-	err = m.mgr.StopPIndex(m.pindex, false) // stop feeds
-	// do feeds need to be stopped?
-	if err != nil {
-		return nil, fmt.Errorf("hib pindexes: error stopping pindex: %s", err.Error())
+		return searchResult, fmt.Errorf("hib pindexes: error searching : %s",
+			err.Error())
 	}
 	err = m.pindex.Close(false)
 	if err != nil {
-		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s", err.Error())
+		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s",
+			err.Error())
 	}
 
 	return searchResult, nil
