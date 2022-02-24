@@ -157,14 +157,12 @@ func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager) (map[string]ind
 
 // Returns a FQDN URL to the /nsstats endpoint.
 func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
-	cfg := mgr.Cfg()
-
-	nodeDefs, _, err := cbgt.CfgGetNodeDefs(cfg, cbgt.NODE_DEFS_KNOWN)
+	nodeDefs, err := mgr.GetNodeDefs(cbgt.NODE_DEFS_KNOWN, false)
 	if err != nil {
-		return "", errors.Wrapf(err, "Error getting nodedefs")
+		return "", errors.Wrapf(err, "hibernate: error getting nodedefs")
 	}
 	if nodeDefs == nil {
-		return "", fmt.Errorf("empty nodedefs")
+		return "", fmt.Errorf("hibernate: empty nodedefs")
 	}
 
 	prefix := mgr.Options()["urlPrefix"]
@@ -192,7 +190,7 @@ func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
 func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
 	url, err := getNsStatsURL(mgr, bindHTTP)
 	if err != nil {
-		return errors.Wrapf(err, "Error getting /nsstats endpoint URL")
+		return errors.Wrapf(err, "hibernate: error getting /nsstats endpoint URL")
 	}
 
 	indexActivityStatsSample := make(chan indexActivityStats)
@@ -202,18 +200,17 @@ func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
 
 	resCh, err := startIndexActivityMonitor(url, indexActivityStatsSample, *options)
 	if err != nil {
-		return errors.Wrapf(err, "Error starting NSMonitor")
+		return errors.Wrapf(err, "hibernate: error starting NSMonitor")
 	}
 	go func() {
 		for r := range resCh.SampleCh {
 			result, err := unmarshalIndexActivityStats(r.Data, mgr)
 			if err != nil {
-				log.Printf("Hibernate: Error unmarshalling stats: %e", err)
+				log.Printf("hibernate: error unmarshalling stats: %e", err)
 				continue
 				// should continue even if unmarshalling does not
 				// work for one endpoint.
 			}
-			//log.Printf("Hibernate: Result: %+v", result)
 			go updateHibernationStatus(mgr, result)
 		}
 	}()
