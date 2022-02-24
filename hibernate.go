@@ -218,7 +218,8 @@ func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
 func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
 	url, err := getNsStatsURL(mgr, bindHTTP)
 	if err != nil {
-		return errors.Wrapf(err, "Error getting /nsstats endpoint URL")
+		return errors.Wrapf(err, "hibernate: error getting /nsstats endpoint URL: %s",
+			err.Error())
 	}
 
 	indexActivityStatsSample := make(chan indexActivityStats)
@@ -235,7 +236,7 @@ func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
 		for r := range resCh.SampleCh {
 			result, err := unmarshalIndexActivityStats(r.Data, mgr)
 			if err != nil {
-				log.Printf("hibernate: Error unmarshalling stats: %s", err.Error())
+				log.Printf("hibernate: error unmarshalling stats: %s", err.Error())
 				continue
 				// should continue even if unmarshalling does not
 				// work for one endpoint.
