@@ -3,12 +3,10 @@ package cbft
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/buger/jsonparser"
 	jp "github.com/buger/jsonparser"
-	"github.com/couchbase/cbgt"
 	"github.com/pkg/errors"
 )
 
@@ -62,61 +60,15 @@ var DefaultColdPolicy = hibernationPolicy{
 	HibernationCriteria: []condition{defaultColdCondition},
 }
 
-var (
-	// Metrics considered in the hibernation policy
-	metrics = []string{
-		"last_accessed_time",
-	}
-	// Permitted actions.
-	actions = []string{
-		"planFreeze",
-		"ingestControl",
-		"close",
-	}
-)
-
 // have an Actions map: planFreeze: func(indexName,mgr)
 
-func updateIndexStatus(mgr *cbgt.Manager, indexDefs *cbgt.IndexDefs, results map[string]individualIndexActivityStats) bool {
-	indexUUID := cbgt.NewUUID()
-	var changed bool
-
-	if indexDefs != nil {
-		for _, index := range indexDefs.IndexDefs {
-			indexName := index.Name
-			changed = false
-			indexLastAccessTime := results[index.Name].LastAccessedTime
-			if time.Since(indexLastAccessTime) > DefaultColdPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
-				if index.HibernateStatus != cbgt.Cold {
-					changed = true
-					index.UUID = indexUUID
-					index.HibernateStatus = cbgt.Cold
-					// invoking idxControl here did not change the indexDefs, hence same plan
-					log.Printf("index %s being set to cold", indexName)
-				}
-			} else if time.Since(indexLastAccessTime) > DefaultWarmPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
-				if index.HibernateStatus != cbgt.Warm {
-					changed = true
-					index.UUID = indexUUID
-					index.HibernateStatus = cbgt.Warm
-					log.Printf("index %s being set to warm", indexName)
-				}
-			} else {
-				if index.HibernateStatus != cbgt.Hot {
-					changed = true
-					index.UUID = indexUUID
-					index.HibernateStatus = cbgt.Hot
-					log.Printf("index %s being set to hot", indexName)
-				}
-			}
-			if changed {
-				indexDefs.IndexDefs[indexName] = index // only if there is change only then update indexDefs
-				indexDefs.UUID = indexUUID
-			}
-		}
+// Function to marshal results(stats) map into custom JSON
+// returns []byte for easy parsing.
+func marshalResults(results map[string]individualIndexActivityStats) ([]byte, error) {
+	resBytes, err := json.Marshal(results)
+	if err != nil {
+		return []byte{}, errors.Wrapf(err, "error marshaling results: ")
 	}
 
-	return changed
+	return resBytes, nil
 }
-
-
