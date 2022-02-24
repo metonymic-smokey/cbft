@@ -64,14 +64,6 @@ func (m *HibernatedPIndex) Search(req *bleve.SearchRequest) (
 
 func (m *HibernatedPIndex) SearchInContext(ctx context.Context,
 	req *bleve.SearchRequest) (*bleve.SearchResult, error) {
-	// trial - here since existing indexes will be 'bleve opened' on startup.
-	// can consider removing this once cold indexes are not 'bleve opened' on start
-	err := m.pindex.Close(false)
-	if err != nil {
-		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s",
-			err.Error())
-	}
-
 	kvConfig := make(map[string]interface{})
 	kvConfig["read_only"] = true
 	log.Printf("hib pindexes: start open using: %s", m.pindex.Path)
