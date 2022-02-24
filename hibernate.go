@@ -126,7 +126,7 @@ func applyHibernationPolicies(mgr *cbgt.Manager, indexDefs *cbgt.IndexDefs) {
 // Currently, only returns the last_access_time for each index.
 func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager) (map[string]individualIndexActivityStats, error) {
 	result := make(map[string]individualIndexActivityStats)
-	indexDefs, _, err := mgr.GetIndexDefs(true)
+	indexDefs, _, err := mgr.GetIndexDefs(false)
 	if err != nil {
 		return result, errors.Wrapf(err, "error getting index defs")
 	}
