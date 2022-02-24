@@ -65,6 +65,12 @@ func (m *HibernatedPIndex) Search(req *bleve.SearchRequest) (
 func (m *HibernatedPIndex) SearchInContext(ctx context.Context,
 	req *bleve.SearchRequest) (*bleve.SearchResult, error) {
 	log.Printf("hib pindexes: in searchincontext...")
+	// trial - here since existing indexes will be 'bleve opened' on startup.
+	// can consider removing this once cold indexes are not 'bleve opened' on start
+	err := m.pindex.Close(false)
+	if err != nil {
+		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s", err.Error())
+	}
 
 	restart := func() {} // just for trial
 	bleveParams := NewBleveParams()
@@ -81,19 +87,22 @@ func (m *HibernatedPIndex) SearchInContext(ctx context.Context,
 		DestProvider: NewBleveDest(m.pindex.Path, bindex, restart, bleveParams.DocConfig),
 	}
 	log.Printf("hib pindexes: finished open using: %s", m.pindex.Path)
-	log.Printf("hib pindexes: converting to bleve index...")
 
 	// call search in context using bindex
 	searchResult, err := bindex.SearchInContext(ctx, req)
 	if err != nil {
 		return searchResult, fmt.Errorf("hib pindexes: error searching : %s", err.Error())
 	}
+	// works with only stopPIndex() for a new index
 	err = m.mgr.StopPIndex(m.pindex, false) // stop feeds
+	// do feeds need to be stopped?
 	if err != nil {
 		return nil, fmt.Errorf("hib pindexes: error stopping pindex: %s", err.Error())
 	}
-	// tempClosePIndex() introduced timeout error.
-	// stop batch workers here
+	err = m.pindex.Close(false)
+	if err != nil {
+		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s", err.Error())
+	}
 
 	return searchResult, nil
 }
