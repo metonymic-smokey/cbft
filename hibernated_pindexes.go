@@ -72,8 +72,7 @@ func (m *HibernatedPIndex) SearchInContext(ctx context.Context,
 			err.Error())
 	}
 
-	bleveParams := NewBleveParams()
-	kvConfig, _, _ := bleveRuntimeConfigMap(bleveParams)
+	kvConfig := make(map[string]interface{})
 	kvConfig["read_only"] = true
 	log.Printf("hib pindexes: start open using: %s", m.pindex.Path)
 	bindex, err := bleve.OpenUsing(m.pindex.Path, kvConfig)
