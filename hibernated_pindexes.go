@@ -80,9 +80,10 @@ func (m *HibernatedPIndex) SearchInContext(ctx context.Context,
 		return searchResult, fmt.Errorf("hib pindexes: error searching : %s",
 			err.Error())
 	}
-	err = m.pindex.Close(false)
+	// close bleve index
+	err = bindex.Close()
 	if err != nil {
-		return nil, fmt.Errorf("hib pindexes: error closing pindex: %s",
+		return nil, fmt.Errorf("hib pindexes: error closing bleve index: %s",
 			err.Error())
 	}
 
