@@ -65,14 +65,7 @@ type individualIndexActivityStats struct {
 // buffered channel - push Result into channel?
 // analyse stats from results and apply hibernation policies
 func updateHibernationStatus(mgr *cbgt.Manager,
-	results map[string]individualIndexActivityStats) error {
-	// indexDefs, cas, err := mgr.GetIndexDefs(true) - cannot do this since cas needed later on
-	cfg := mgr.Cfg()
-	indexDefs, cas, err := cbgt.CfgGetIndexDefs(cfg)
-	if err != nil {
-		return errors.Wrapf(err, "hibernate: error getting index defs:")
-	}
-
+	results map[string]individualIndexActivityStats, indexDefs *cbgt.IndexDefs) error {
 	indexUUID := cbgt.NewUUID()
 	var changed, anyChange bool
 
@@ -97,7 +90,8 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 			indexName := index.Name
 			changed = false
 			indexLastAccessTime := results[index.Name].LastAccessedTime
-			if time.Since(indexLastAccessTime) > DefaultColdPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
+			if time.Since(indexLastAccessTime) >
+				DefaultColdPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
 				if index.HibernateStatus != cbgt.Cold {
 					log.Printf("index %s being set to cold", indexName)
 					changed = true
@@ -107,7 +101,8 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 					npp.CanWrite = false
 					index.PlanParams.PlanFrozen = true
 				}
-			} else if time.Since(indexLastAccessTime) > DefaultWarmPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
+			} else if time.Since(indexLastAccessTime) >
+				DefaultWarmPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
 				if index.HibernateStatus != cbgt.Warm {
 					log.Printf("index %s being set to warm", indexName)
 					changed = true
@@ -137,25 +132,22 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 
 	if anyChange {
 		log.Printf("hibernate: update hibernate status %s...", changed)
-		_, err = cbgt.CfgSetIndexDefs(cfg, indexDefs, cas)
+		_, err := cbgt.CfgSetIndexDefs(mgr.Cfg(), indexDefs, cbgt.CFG_CAS_FORCE)
 		if err != nil {
 			return errors.Wrapf(err, "hibernate: error setting index defs: %s",
 				err.Error())
 		}
 		// locks not required here since Set uses locks internally.
 	}
-	return err
+	return nil
 }
 
 // Unmarshals /nsstats and returns the relevant stats in a struct
 // Currently, only returns the last_access_time for each index.
-func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager) (map[string]individualIndexActivityStats, error) {
+func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager, indexDefs *cbgt.IndexDefs) (
+	map[string]individualIndexActivityStats, error) {
 	result := make(map[string]individualIndexActivityStats)
-	indexDefs, _, err := mgr.GetIndexDefs(false)
-	if err != nil {
-		return result, errors.Wrapf(err, "hibernate: error getting index defs: %s",
-			err.Error())
-	}
+
 	if indexDefs != nil {
 		for _, index := range indexDefs.IndexDefs {
 			bucketName := index.SourceName
@@ -163,14 +155,15 @@ func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager) (map[string]ind
 			path := bucketName + ":" + indexName + ":" + LastAccessedTime
 			resByte, _, _, err := jp.Get(data, path)
 			if err != nil {
-				return result, errors.Wrapf(err, "hibernate: error extracting data from response: %s",
-					err.Error())
+				return result, errors.Wrapf(err, "hibernate: error extracting data "+
+					"from response: %s", err.Error())
 			}
 			stringRes := string(resByte)
 			if stringRes != "" {
 				resTime, err := time.Parse(time.RFC3339, stringRes)
 				if err != nil {
-					log.Printf("hibernate: error parsing result into time format: %s", err.Error())
+					log.Printf("hibernate: error parsing result into time format: %s",
+						err.Error())
 				} else {
 					result[indexName] = individualIndexActivityStats{
 						LastAccessedTime: resTime,
@@ -196,20 +189,20 @@ func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
 	prefix := mgr.Options()["urlPrefix"]
 	// polling one node endpoint is enough - avoids duplicate statistics.
 	for _, node := range nodeDefs.NodeDefs {
-		fqdnURL := "http://" + bindHTTP + prefix + "/api/nsstats"
-		// no auth required for /nsstats
-		secSettings := cbgt.GetSecuritySetting()
-		if secSettings.EncryptionEnabled {
-			if httpsURL, err := node.HttpsURL(); err == nil {
-				fqdnURL = httpsURL
+		if node.UUID == mgr.UUID() { // polling only mgr URL to avoid redundancy
+			fqdnURL := "http://" + bindHTTP + prefix + "/api/nsstats"
+			// no auth required for /nsstats
+			secSettings := cbgt.GetSecuritySetting()
+			if secSettings.EncryptionEnabled {
+				if httpsURL, err := node.HttpsURL(); err == nil {
+					fqdnURL = httpsURL
+				}
 			}
+			// request error: parse 192.168.1.6:9200/api/nsstats: first path segment in URL cannot contain colon
+			// Ref: https://stackoverflow.com/questions/54392948/first-path-segment-in-url-cannot-contain-colon
+			fqdnURL = strings.Trim(fqdnURL, "\n")
+			return fqdnURL, nil
 		}
-		// request error: parse 192.168.1.6:9200/api/nsstats: first path segment in URL cannot contain colon
-		// Ref: https://stackoverflow.com/questions/54392948/first-path-segment-in-url-cannot-contain-colon
-		fqdnURL = strings.Trim(fqdnURL, "\n")
-		// possibly check node health here?
-		// return only if node is healthy?
-		return fqdnURL, nil
 	}
 	return "", nil
 }
@@ -234,14 +227,20 @@ func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
 	}
 	go func() {
 		for r := range resCh.SampleCh {
-			result, err := unmarshalIndexActivityStats(r.Data, mgr)
+			indexDefs, _, err := mgr.GetIndexDefs(false)
+			if err != nil {
+				log.Printf("hibernate: error getting index defs: %s", err.Error())
+				continue
+			} // should this be called for every sample for refreshed index defs
+			// or just once, since the defs will be same either ways?
+			result, err := unmarshalIndexActivityStats(r.Data, mgr, indexDefs)
 			if err != nil {
 				log.Printf("hibernate: error unmarshalling stats: %s", err.Error())
 				continue
 				// should continue even if unmarshalling does not
 				// work for one endpoint.
 			}
-			go updateHibernationStatus(mgr, result)
+			go updateHibernationStatus(mgr, result, indexDefs)
 		}
 	}()
 
