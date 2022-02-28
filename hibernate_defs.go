@@ -2,11 +2,9 @@ package cbft
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
-	"github.com/buger/jsonparser"
-	jp "github.com/buger/jsonparser"
+	"github.com/couchbase/cbgt"
 	"github.com/pkg/errors"
 )
 
@@ -24,32 +22,42 @@ type hibernationPolicy struct {
 }
 
 type lifecycleAction struct {
-	Action transitionAction
-	// runInterval time.Duration
+	AcceptIndexing bool `json:"ingestControl",omitempty`
+	AcceptPlanning bool `json:"planFreeze",omitempty`
+	Hibernate      bool `json:"hibernate",omitempty`
 }
 
-type transitionAction struct {
-	AcceptMutation bool `json:"ingestControl",omitempty`
-	AcceptPlanning bool `json:"planFreeze",omitempty`
-	Close          bool `json:"close",omitempty`
+var defaultHotCondition = condition{
+	Actions: []lifecycleAction{{
+		AcceptPlanning: true,
+		AcceptIndexing: true,
+		Hibernate:      false},
+	},
 }
 
 var defaultWarmCondition = condition{
 	Criteria: map[string]time.Duration{
 		"last_accessed_time": 1 * time.Minute,
 	},
-	Actions: []lifecycleAction{{Action: transitionAction{AcceptPlanning: false}}},
+	Actions: []lifecycleAction{{
+		AcceptPlanning: false,
+		AcceptIndexing: true},
+	},
 }
 
 var defaultColdCondition = condition{
 	Criteria: map[string]time.Duration{
 		"last_accessed_time": 3 * time.Minute,
 	},
-	Actions: []lifecycleAction{{Action: transitionAction{
-		AcceptPlanning: false, AcceptMutation: false, Close: true}, //find better name for close? - active?
-	//planning instead of acceptplan
-	// plan, index, active
-	}},
+	Actions: []lifecycleAction{{
+		AcceptPlanning: false,
+		AcceptIndexing: false,
+		Hibernate:      true},
+	},
+}
+
+var DefaultHotPolicy = hibernationPolicy{
+	HibernationCriteria: []condition{defaultHotCondition},
 }
 
 var DefaultWarmPolicy = hibernationPolicy{
@@ -60,7 +68,28 @@ var DefaultColdPolicy = hibernationPolicy{
 	HibernationCriteria: []condition{defaultColdCondition},
 }
 
-// have an Actions map: planFreeze: func(indexName,mgr)
+type IndexMonitoringHandler struct {
+	mgr *cbgt.Manager
+}
+
+func NewIndexMonitoringHandler(mgr *cbgt.Manager) *IndexMonitoringHandler {
+	return &IndexMonitoringHandler{
+		mgr: mgr,
+	}
+}
+
+type IndexHibernationHandler struct {
+	mgr             *cbgt.Manager
+	allowedStatuses map[string]struct{}
+}
+
+func NewIndexHibernationHandler(
+	mgr *cbgt.Manager, allowedStatuses map[string]struct{}) *IndexHibernationHandler {
+	return &IndexHibernationHandler{
+		mgr:             mgr,
+		allowedStatuses: allowedStatuses,
+	}
+}
 
 // Function to marshal results(stats) map into custom JSON
 // returns []byte for easy parsing.

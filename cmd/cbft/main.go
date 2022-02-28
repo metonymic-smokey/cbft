@@ -614,6 +614,16 @@ func mainStart(cfg cbgt.Cfg, uuid string, tags []string, container string,
 	handle(prefix+"/api/query/index/{indexName}", "GET",
 		cbft.NewQuerySupervisorDetails(mgr))
 
+	handle(prefix+"/api/v1/index/monitoring/{op}", "POST",
+		cbft.NewIndexMonitoringHandler(mgr))
+
+	handle(prefix+"/api/v1/index/hibernation/{indexName}/{status}", "POST",
+		cbft.NewIndexHibernationHandler(mgr, map[string]struct{}{
+			"hot":  struct{}{},
+			"warm": struct{}{},
+			"cold": struct{}{},
+		}))
+
 	handle(prefix+"/api/conciseOptions", "GET", cbft.NewConciseOptions(mgr))
 
 	router := exportMuxRoutesToHttprouter(muxrouter, options)
@@ -757,8 +767,6 @@ func mainStart(cfg cbgt.Cfg, uuid string, tags []string, container string,
 	// ------------------------------------------------
 
 	go runBleveExpvarsCooker(mgr)
-
-	cbft.IndexHibernateProbe(mgr, bindHTTP)
 
 	return router, err
 }

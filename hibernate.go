@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/couchbase/cbgt"
+	"github.com/couchbase/cbgt/rest"
 	log "github.com/couchbase/clog"
 
 	jp "github.com/buger/jsonparser"
@@ -25,9 +26,9 @@ var DefaultDoFunc = func(client *http.Client, req *http.Request) (*http.Response
 	return resp, nil
 }
 
-// IndexActivityStats is a struct holding statistics about
+// IndexActivityStats is a struct holding details about
 // search indexes.
-type indexActivityStats struct {
+type indexActivityDetails struct {
 	Url      string        // Ex: "http://10.0.0.1:8095".
 	Start    time.Time     // When we started to get this sample.
 	Duration time.Duration // How long it took to get this sample.
@@ -50,7 +51,7 @@ type indexActivityStatsOptions struct {
 // stats for a specific URL.
 type MonitorIndexActivityStats struct {
 	URL      string // REST URL to monitor
-	SampleCh chan indexActivityStats
+	SampleCh chan indexActivityDetails
 	Options  indexActivityStatsOptions
 	StopCh   chan struct{}
 }
@@ -86,52 +87,46 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 				}
 			}
 
-			npp := index.PlanParams.NodePlanParams[""][""]
 			indexName := index.Name
 			changed = false
+			var policy hibernationPolicy
+			var hibernationStatus int
 			indexLastAccessTime := results[index.Name].LastAccessedTime
 			if time.Since(indexLastAccessTime) >
 				DefaultColdPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
 				if index.HibernateStatus != cbgt.Cold {
 					log.Printf("index %s being set to cold", indexName)
 					changed = true
-					index.UUID = indexUUID
-					index.HibernateStatus = cbgt.Cold
-					// invoking idxControl here did not change the indexDefs, hence same plan
-					npp.CanWrite = false
-					index.PlanParams.PlanFrozen = true
+					hibernationStatus = cbgt.Cold
+					policy = DefaultColdPolicy
 				}
 			} else if time.Since(indexLastAccessTime) >
 				DefaultWarmPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
 				if index.HibernateStatus != cbgt.Warm {
 					log.Printf("index %s being set to warm", indexName)
 					changed = true
-					index.UUID = indexUUID
-					index.HibernateStatus = cbgt.Warm
-					npp.CanWrite = true
-					index.PlanParams.PlanFrozen = true
+					hibernationStatus = cbgt.Warm
+					policy = DefaultWarmPolicy
 				}
-			} else {
-				if index.HibernateStatus != cbgt.Hot {
-					log.Printf("index %s being set to hot", indexName)
-					changed = true
-					index.UUID = indexUUID
-					index.HibernateStatus = cbgt.Hot
-					npp.CanWrite = true
-					index.PlanParams.PlanFrozen = false
-				}
+			} else if index.HibernateStatus != cbgt.Hot {
+				log.Printf("index %s being set to hot", indexName)
+				changed = true
+				hibernationStatus = cbgt.Hot
+				policy = DefaultHotPolicy
 			}
+
 			if changed {
 				anyChange = true
+				updateIndexParams(index, indexUUID, hibernationStatus, policy)
 				indexDefs.IndexDefs[indexName] = index
-				// only if there is change, update indexDefs
-				indexDefs.UUID = indexUUID
 			}
 		}
 	}
 
+	// only if there is change, update indexDefs
 	if anyChange {
 		log.Printf("hibernate: update hibernate status %s...", changed)
+		indexDefs.UUID = indexUUID
 		_, err := cbgt.CfgSetIndexDefs(mgr.Cfg(), indexDefs, cbgt.CFG_CAS_FORCE)
 		if err != nil {
 			return errors.Wrapf(err, "hibernate: error setting index defs: %s",
@@ -142,9 +137,20 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 	return nil
 }
 
+// Updates hibernation related parameters for indexDef.
+func updateIndexParams(indexDef *cbgt.IndexDef, uuid string, hibernateStatus int,
+	policy hibernationPolicy) {
+	acceptPlanning := policy.HibernationCriteria[0].Actions[0].AcceptPlanning
+	acceptMutation := policy.HibernationCriteria[0].Actions[0].AcceptIndexing
+	indexDef.UUID = uuid
+	indexDef.HibernateStatus = hibernateStatus
+	indexDef.PlanParams.NodePlanParams[""][""].CanWrite = acceptMutation
+	indexDef.PlanParams.PlanFrozen = !acceptPlanning
+}
+
 // Unmarshals /nsstats and returns the relevant stats in a struct
 // Currently, only returns the last_access_time for each index.
-func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager, indexDefs *cbgt.IndexDefs) (
+func extractIndexActivityStats(data []byte, mgr *cbgt.Manager, indexDefs *cbgt.IndexDefs) (
 	map[string]individualIndexActivityStats, error) {
 	result := make(map[string]individualIndexActivityStats)
 
@@ -164,10 +170,10 @@ func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager, indexDefs *cbgt
 				if err != nil {
 					log.Printf("hibernate: error parsing result into time format: %s",
 						err.Error())
-				} else {
-					result[indexName] = individualIndexActivityStats{
-						LastAccessedTime: resTime,
-					}
+					continue
+				}
+				result[indexName] = individualIndexActivityStats{
+					LastAccessedTime: resTime,
 				}
 			}
 		}
@@ -176,7 +182,7 @@ func unmarshalIndexActivityStats(data []byte, mgr *cbgt.Manager, indexDefs *cbgt
 }
 
 // Returns a FQDN URL to the /nsstats endpoint.
-func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
+func getNsStatsURL(mgr *cbgt.Manager) (string, error) {
 	nodeDefs, err := mgr.GetNodeDefs(cbgt.NODE_DEFS_KNOWN, false)
 	if err != nil {
 		return "", errors.Wrapf(err, "hibernate: error getting nodedefs: %s",
@@ -186,86 +192,170 @@ func getNsStatsURL(mgr *cbgt.Manager, bindHTTP string) (string, error) {
 		return "", fmt.Errorf("hibernate: empty nodedefs: %s", err.Error())
 	}
 
-	prefix := mgr.Options()["urlPrefix"]
-	// polling one node endpoint is enough - avoids duplicate statistics.
 	for _, node := range nodeDefs.NodeDefs {
-		if node.UUID == mgr.UUID() { // polling only mgr URL to avoid redundancy
-			fqdnURL := "http://" + bindHTTP + prefix + "/api/nsstats"
-			// no auth required for /nsstats
-			secSettings := cbgt.GetSecuritySetting()
-			if secSettings.EncryptionEnabled {
-				if httpsURL, err := node.HttpsURL(); err == nil {
-					fqdnURL = httpsURL
-				}
+		url := "http://" + mgr.BindHttp() + "/api/nsstats"
+		// no auth required for /nsstats
+		secSettings := cbgt.GetSecuritySetting()
+		if secSettings.EncryptionEnabled {
+			if httpsURL, err := node.HttpsURL(); err == nil {
+				url = httpsURL
 			}
-			// request error: parse 192.168.1.6:9200/api/nsstats: first path segment in URL cannot contain colon
-			// Ref: https://stackoverflow.com/questions/54392948/first-path-segment-in-url-cannot-contain-colon
-			fqdnURL = strings.Trim(fqdnURL, "\n")
-			return fqdnURL, nil
 		}
+		// request error: parse 192.168.1.6:9200/api/nsstats: first path segment in URL cannot contain colon
+		// Ref: https://stackoverflow.com/questions/54392948/first-path-segment-in-url-cannot-contain-colon
+		url = strings.Trim(url, "\n")
+		return url, nil
 	}
 	return "", nil
 }
 
-// IndexHibernateProbe monitors an index's activity.
-func IndexHibernateProbe(mgr *cbgt.Manager, bindHTTP string) error {
-	url, err := getNsStatsURL(mgr, bindHTTP)
+func (h *IndexMonitoringHandler) ServeHTTP(
+	w http.ResponseWriter, req *http.Request) {
+	monitorIndexActivityStats, err := InitMonitorIndexActivityStats(h.mgr)
 	if err != nil {
-		return errors.Wrapf(err, "hibernate: error getting /nsstats endpoint URL: %s",
+		return
+	}
+	op := rest.RequestVariableLookup(req, "op")
+	if op == "start" {
+		IndexHibernateProbe(h.mgr, monitorIndexActivityStats)
+	} else if op == "stop" {
+		monitorIndexActivityStats.Stop()
+	} else {
+		log.Printf("rest_index: invalid operation") // handle this better - like indexcontrol func
+		return
+	}
+	rv := struct {
+		Status string `json:"status"`
+	}{
+		Status: op,
+	}
+	rest.MustEncode(w, rv)
+}
+
+func (h *IndexHibernationHandler) ServeHTTP(
+	w http.ResponseWriter, req *http.Request) {
+	indexName := rest.IndexNameLookup(req)
+	if indexName == "" {
+		rest.ShowError(w, req, "index name is required", http.StatusBadRequest)
+		return
+	}
+
+	indexUUID := cbgt.NewUUID()
+	status := rest.RequestVariableLookup(req, "status")
+	if _, ok := h.allowedStatuses[status]; !ok {
+		rest.ShowError(w, req, fmt.Sprintf("hibernate: invalid status: %s", status),
+			http.StatusBadRequest)
+		return
+	}
+
+	indexDefs, indexDefsMap, err := h.mgr.GetIndexDefs(false)
+	if err != nil {
+		rest.ShowError(w, req, fmt.Sprintf("hibernate: error getting index defs: %e", err),
+			http.StatusBadRequest)
+		return
+	}
+	indexDef := indexDefsMap[indexName]
+
+	// need to change default policy to custom
+	if status == "cold" && indexDef.HibernateStatus != cbgt.Cold {
+		updateIndexParams(indexDef, indexUUID, cbgt.Cold, DefaultColdPolicy)
+		indexDefs.IndexDefs[indexName] = indexDef
+		indexDefs.UUID = indexUUID
+	} else if status == "warm" && indexDef.HibernateStatus != cbgt.Warm {
+		updateIndexParams(indexDef, indexUUID, cbgt.Warm, DefaultWarmPolicy)
+		indexDefs.IndexDefs[indexName] = indexDef
+		indexDefs.UUID = indexUUID
+	} else if status == "hot" && indexDef.HibernateStatus != cbgt.Hot {
+		updateIndexParams(indexDef, indexUUID, cbgt.Hot, DefaultHotPolicy)
+		indexDefs.IndexDefs[indexName] = indexDef
+		indexDefs.UUID = indexUUID
+	}
+
+	_, err = cbgt.CfgSetIndexDefs(h.mgr.Cfg(), indexDefs, cbgt.CFG_CAS_FORCE)
+	if err != nil {
+		rest.ShowError(w, req, fmt.Sprintf("hibernate: error setting index defs: %e", err),
+			http.StatusBadRequest)
+		return
+	}
+	rv := struct {
+		Status string `json:"status"`
+	}{
+		Status: status,
+	}
+	rest.MustEncode(w, rv)
+}
+
+func NewMonitorIndexActivityStats(url string, indexActivityStatsSample chan indexActivityDetails,
+	options *indexActivityStatsOptions) *MonitorIndexActivityStats {
+	return &MonitorIndexActivityStats{
+		URL:      url,
+		SampleCh: indexActivityStatsSample,
+		Options:  *options,
+		StopCh:   make(chan struct{}),
+	}
+}
+
+func InitMonitorIndexActivityStats(mgr *cbgt.Manager) (*MonitorIndexActivityStats, error) {
+	url, err := getNsStatsURL(mgr)
+	if err != nil {
+		return nil, errors.Wrapf(err, "hibernate: error getting /nsstats endpoint URL: %s",
 			err.Error())
 	}
 
-	indexActivityStatsSample := make(chan indexActivityStats)
+	indexActivityStatsSample := make(chan indexActivityDetails)
 	options := &indexActivityStatsOptions{
 		indexActivityStatsSampleInterval: 1 * time.Minute,
+		// replace with custom interval here - from mgr cluster options
 	}
 
-	resCh, err := startIndexActivityMonitor(url, indexActivityStatsSample, *options)
+	return NewMonitorIndexActivityStats(url, indexActivityStatsSample, options), nil
+}
+
+// IndexHibernateProbe monitors an index's activity.
+func IndexHibernateProbe(mgr *cbgt.Manager, resCh *MonitorIndexActivityStats) error {
+	err := startIndexActivityMonitor(resCh)
 	if err != nil {
 		return errors.Wrapf(err, "hibernate: error starting NSMonitor: %s",
 			err.Error())
 	}
 	go func() {
 		for r := range resCh.SampleCh {
-			indexDefs, _, err := mgr.GetIndexDefs(false)
-			if err != nil {
-				log.Printf("hibernate: error getting index defs: %s", err.Error())
-				continue
-			} // should this be called for every sample for refreshed index defs
-			// or just once, since the defs will be same either ways?
-			result, err := unmarshalIndexActivityStats(r.Data, mgr, indexDefs)
-			if err != nil {
-				log.Printf("hibernate: error unmarshalling stats: %s", err.Error())
-				continue
-				// should continue even if unmarshalling does not
-				// work for one endpoint.
-			}
-			go updateHibernationStatus(mgr, result, indexDefs)
+			processIndexActivityStats(mgr, r)
 		}
 	}()
 
 	return err
 }
 
-// startIndexActivityMonitor starts a goroutine to monitor a URL and returns
-// the stats from polling that URL.
-func startIndexActivityMonitor(url string, sampleCh chan indexActivityStats,
-	options indexActivityStatsOptions) (*MonitorIndexActivityStats, error) {
-	n := &MonitorIndexActivityStats{
-		URL:      url,
-		SampleCh: sampleCh,
-		Options:  options,
-		StopCh:   make(chan struct{}),
+// Processes index activity stats from extracting the relevant fields to updating
+// index defs based on the stats.
+func processIndexActivityStats(mgr *cbgt.Manager, stats indexActivityDetails) {
+	indexDefs, _, err := mgr.GetIndexDefs(false)
+	if err != nil {
+		log.Printf("hibernate: error getting index defs: %s", err.Error())
+		return
 	}
-
-	go n.runNode(url)
-
-	return n, nil
+	result, err := extractIndexActivityStats(stats.Data, mgr, indexDefs)
+	if err != nil {
+		log.Printf("hibernate: error unmarshalling stats: %s", err.Error())
+		return
+		// should continue even if unmarshalling does not
+		// work for one endpoint.
+	}
+	updateHibernationStatus(mgr, result, indexDefs)
 }
 
-// runNode polls a specific URL at given intervals, gathering
+// startIndexActivityMonitor starts a goroutine to monitor a URL and returns
+// the stats from polling that URL.
+func startIndexActivityMonitor(n *MonitorIndexActivityStats) error {
+	go n.pollURL(n.URL)
+
+	return nil
+}
+
+// pollURL polls a specific URL at given intervals, gathering
 // stats for a specific node.
-func (n *MonitorIndexActivityStats) runNode(url string) {
+func (n *MonitorIndexActivityStats) pollURL(url string) {
 	IndexActivityStatsSampleInterval := n.Options.indexActivityStatsSampleInterval
 	if IndexActivityStatsSampleInterval <= 0 {
 		IndexActivityStatsSampleInterval =
@@ -310,15 +400,13 @@ func (n *MonitorIndexActivityStats) sample(url string, start time.Time) {
 	res, err := n.Options.Do(client, req)
 	if err != nil {
 		log.Printf("hibernate: Response error: %s", err.Error())
-		if res.Body != nil {
-			res.Body.Close()
-		}
-		// closing here since defer will not apply on a premature return
+		// do not need to close res.Body here since already closed on non-nil err.
+		// Ref: https://github.com/mholt/curl-to-go/issues/6#issuecomment-283641312
 		return
 	}
-	if res.Body != nil {
-		defer res.Body.Close()
-	}
+	// removed not-nil check for res.Body since if err == nil, body = not nil
+	// Ref: https://medium.com/@KeithAlpichi/go-gotcha-closing-a-nil-http-response-body-with-defer-9b7a3eb30e8c
+	defer res.Body.Close()
 	duration := time.Since(start)
 
 	data := []byte{}
@@ -341,7 +429,7 @@ func (n *MonitorIndexActivityStats) sample(url string, start time.Time) {
 			res, url, err)
 	}
 
-	finalIndexActivityStatsSample := indexActivityStats{
+	finalIndexActivityStatsSample := indexActivityDetails{
 		Url:      url,
 		Duration: duration,
 		Error:    err,
