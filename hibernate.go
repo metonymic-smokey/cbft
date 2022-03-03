@@ -69,6 +69,7 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 	results map[string]individualIndexActivityStats, indexDefs *cbgt.IndexDefs) error {
 	indexUUID := cbgt.NewUUID()
 	var changed, anyChange bool
+	layout := "2006-01-02 15:04:05 -0700 MST"
 
 	if indexDefs != nil {
 		for _, index := range indexDefs.IndexDefs {
@@ -92,6 +93,17 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 			var policy hibernationPolicy
 			var hibernationStatus int
 			indexLastAccessTime := results[index.Name].LastAccessedTime
+			t, err := time.Parse(layout, "0001-01-01 00:00:00 +0000 UTC")
+			if err != nil {
+				log.Printf("hibernate: error parsing time: %e", err)
+				continue
+			}
+			if t.Equal(indexLastAccessTime) {
+				// log.Printf("nil last access time for %s", mgr.BindHttp())
+				continue
+			}
+			// log.Printf("index last accessed time for url %s: %s", mgr.BindHttp(),
+			//	indexLastAccessTime)
 			if time.Since(indexLastAccessTime) >
 				DefaultColdPolicy.HibernationCriteria[0].Criteria["last_accessed_time"] {
 				if index.HibernateStatus != cbgt.Cold {
@@ -125,7 +137,6 @@ func updateHibernationStatus(mgr *cbgt.Manager,
 
 	// only if there is change, update indexDefs
 	if anyChange {
-		log.Printf("hibernate: update hibernate status %s...", changed)
 		indexDefs.UUID = indexUUID
 		_, err := cbgt.CfgSetIndexDefs(mgr.Cfg(), indexDefs, cbgt.CFG_CAS_FORCE)
 		if err != nil {
@@ -192,36 +203,28 @@ func getNsStatsURL(mgr *cbgt.Manager) (string, error) {
 		return "", fmt.Errorf("hibernate: empty nodedefs: %s", err.Error())
 	}
 
-	for _, node := range nodeDefs.NodeDefs {
-		url := "http://" + mgr.BindHttp() + "/api/nsstats"
-		// no auth required for /nsstats
-		secSettings := cbgt.GetSecuritySetting()
-		if secSettings.EncryptionEnabled {
-			if httpsURL, err := node.HttpsURL(); err == nil {
-				url = httpsURL
-			}
-		}
-		// request error: parse 192.168.1.6:9200/api/nsstats: first path segment in URL cannot contain colon
-		// Ref: https://stackoverflow.com/questions/54392948/first-path-segment-in-url-cannot-contain-colon
-		url = strings.Trim(url, "\n")
-		return url, nil
-	}
-	return "", nil
+	url := "http://" + mgr.BindHttp() + "/api/nsstats"
+	url = strings.Trim(url, "\n")
+	return url, nil
 }
 
 func (h *IndexMonitoringHandler) ServeHTTP(
 	w http.ResponseWriter, req *http.Request) {
-	monitorIndexActivityStats, err := InitMonitorIndexActivityStats(h.mgr)
-	if err != nil {
-		return
+	options := h.mgr.Options()
+	newOptions := map[string]string{}
+	for k, v := range options {
+		newOptions[k] = v
 	}
 	op := rest.RequestVariableLookup(req, "op")
 	if op == "start" {
-		IndexHibernateProbe(h.mgr, monitorIndexActivityStats)
+		newOptions["monitoring"] = "true"
+		h.mgr.SetOptions(newOptions)
 	} else if op == "stop" {
-		monitorIndexActivityStats.Stop()
+		newOptions["monitoring"] = "false"
+		h.mgr.SetOptions(newOptions)
 	} else {
-		log.Printf("rest_index: invalid operation") // handle this better - like indexcontrol func
+		rest.ShowError(w, req, fmt.Sprintf("hibernate: error invalid op: %s",
+			op), http.StatusBadRequest)
 		return
 	}
 	rv := struct {
@@ -243,15 +246,19 @@ func (h *IndexHibernationHandler) ServeHTTP(
 	indexUUID := cbgt.NewUUID()
 	status := rest.RequestVariableLookup(req, "status")
 	if _, ok := h.allowedStatuses[status]; !ok {
-		rest.ShowError(w, req, fmt.Sprintf("hibernate: invalid status: %s", status),
-			http.StatusBadRequest)
+		rest.ShowError(w, req, fmt.Sprintf("hibernate: invalid status: %s",
+			status), http.StatusBadRequest)
 		return
 	}
+	/*
+		log.Printf("hibernate: mgr URL: %s,UUID: %s", h.mgr.BindHttp(),
+			h.mgr.UUID())
+	*/
 
 	indexDefs, indexDefsMap, err := h.mgr.GetIndexDefs(false)
 	if err != nil {
-		rest.ShowError(w, req, fmt.Sprintf("hibernate: error getting index defs: %e", err),
-			http.StatusBadRequest)
+		rest.ShowError(w, req, fmt.Sprintf("hibernate: error getting index defs: %e",
+			err), http.StatusBadRequest)
 		return
 	}
 	indexDef := indexDefsMap[indexName]
@@ -273,8 +280,8 @@ func (h *IndexHibernationHandler) ServeHTTP(
 
 	_, err = cbgt.CfgSetIndexDefs(h.mgr.Cfg(), indexDefs, cbgt.CFG_CAS_FORCE)
 	if err != nil {
-		rest.ShowError(w, req, fmt.Sprintf("hibernate: error setting index defs: %e", err),
-			http.StatusBadRequest)
+		rest.ShowError(w, req, fmt.Sprintf("hibernate: error setting index defs: %e",
+			err), http.StatusBadRequest)
 		return
 	}
 	rv := struct {
@@ -297,7 +304,7 @@ func NewMonitorIndexActivityStats(url string, indexActivityStatsSample chan inde
 
 func InitMonitorIndexActivityStats(mgr *cbgt.Manager) (*MonitorIndexActivityStats, error) {
 	url, err := getNsStatsURL(mgr)
-	if err != nil {
+	if err != nil || url == "" {
 		return nil, errors.Wrapf(err, "hibernate: error getting /nsstats endpoint URL: %s",
 			err.Error())
 	}
@@ -439,6 +446,7 @@ func (n *MonitorIndexActivityStats) sample(url string, start time.Time) {
 
 	select {
 	case <-n.StopCh:
+		close(n.SampleCh) // close sample ch
 	case n.SampleCh <- finalIndexActivityStatsSample:
 	}
 }

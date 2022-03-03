@@ -614,10 +614,10 @@ func mainStart(cfg cbgt.Cfg, uuid string, tags []string, container string,
 	handle(prefix+"/api/query/index/{indexName}", "GET",
 		cbft.NewQuerySupervisorDetails(mgr))
 
-	handle(prefix+"/api/v1/index/monitoring/{op}", "POST",
+	handle(prefix+"/api/v1/monitoring/{op}", "POST",
 		cbft.NewIndexMonitoringHandler(mgr))
 
-	handle(prefix+"/api/v1/index/hibernation/{indexName}/{status}", "POST",
+	handle(prefix+"/api/v1/index/{indexName}/hibernation/{status}", "POST",
 		cbft.NewIndexHibernationHandler(mgr, map[string]struct{}{
 			"hot":  struct{}{},
 			"warm": struct{}{},
@@ -897,6 +897,18 @@ func (meh *mainHandlers) OnRefreshManagerOptions(options map[string]string) {
 		if err != nil {
 			log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
 			return
+		}
+		monitorIndexActivityStats, err := cbft.InitMonitorIndexActivityStats(meh.mgr)
+		if err != nil {
+			log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
+			return
+		}
+		if monitor, ok := meh.mgr.Options()["monitoring"]; ok {
+			if monitor == "true" {
+				cbft.IndexHibernateProbe(meh.mgr, monitorIndexActivityStats)
+			} else if monitor == "false" {
+				monitorIndexActivityStats.Stop()
+			}
 		}
 	}
 }
