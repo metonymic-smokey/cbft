@@ -216,8 +216,10 @@ func (h *IndexMonitoringHandler) ServeHTTP(
 		newOptions[k] = v
 	}
 	op := rest.RequestVariableLookup(req, "op")
+	intervalString := rest.RequestVariableLookup(req, "interval")
 	if op == "start" {
 		newOptions["monitoring"] = "true"
+		newOptions["monitoringInterval"] = intervalString
 		h.mgr.SetOptions(newOptions)
 	} else if op == "stop" {
 		newOptions["monitoring"] = "false"
@@ -309,10 +311,17 @@ func InitMonitorIndexActivityStats(mgr *cbgt.Manager) (*MonitorIndexActivityStat
 			err.Error())
 	}
 
+	intervalString, ok := mgr.Options()["monitoringURL"]
+	var interval time.Duration
+	if ok && intervalString != "" {
+		interval, err = time.ParseDuration(intervalString)
+		if err != nil {
+			log.Printf("hibernate: unable to parse interval: %e, reverting to default", err)
+		}
+	}
 	indexActivityStatsSample := make(chan indexActivityDetails)
 	options := &indexActivityStatsOptions{
-		indexActivityStatsSampleInterval: 1 * time.Minute,
-		// replace with custom interval here - from mgr cluster options
+		indexActivityStatsSampleInterval: interval,
 	}
 
 	return NewMonitorIndexActivityStats(url, indexActivityStatsSample, options), nil
