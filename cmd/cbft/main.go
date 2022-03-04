@@ -617,6 +617,9 @@ func mainStart(cfg cbgt.Cfg, uuid string, tags []string, container string,
 	handle(prefix+"/api/v1/monitoring/{op}", "POST",
 		cbft.NewIndexMonitoringHandler(mgr))
 
+	handle(prefix+"/api/v1/monitoring/{op}/{interval}", "POST",
+		cbft.NewIndexMonitoringHandler(mgr))
+
 	handle(prefix+"/api/v1/index/{indexName}/hibernation/{status}", "POST",
 		cbft.NewIndexHibernationHandler(mgr, map[string]struct{}{
 			"hot":  struct{}{},
@@ -891,6 +894,10 @@ type mainHandlers struct {
 	mgr *cbgt.Manager
 }
 
+var (
+	monitorIndexActivityStats = &cbft.MonitorIndexActivityStats{}
+)
+
 func (meh *mainHandlers) OnRefreshManagerOptions(options map[string]string) {
 	if meh.mgr != nil {
 		err := initBleveOptions(options)
@@ -898,16 +905,20 @@ func (meh *mainHandlers) OnRefreshManagerOptions(options map[string]string) {
 			log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
 			return
 		}
-		monitorIndexActivityStats, err := cbft.InitMonitorIndexActivityStats(meh.mgr)
-		if err != nil {
-			log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
-			return
-		}
 		if monitor, ok := meh.mgr.Options()["monitoring"]; ok {
 			if monitor == "true" {
+				// repopulated on each start
+				monitorIndexActivityStats, err = cbft.InitMonitorIndexActivityStats(meh.mgr)
+				log.Printf("monitor index activity URL: %s", monitorIndexActivityStats.URL)
+				if err != nil {
+					log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
+					return
+				}
 				cbft.IndexHibernateProbe(meh.mgr, monitorIndexActivityStats)
 			} else if monitor == "false" {
-				monitorIndexActivityStats.Stop()
+				if monitorIndexActivityStats.StopCh != nil {
+					monitorIndexActivityStats.Stop()
+				}
 			}
 		}
 	}

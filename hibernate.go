@@ -56,6 +56,11 @@ type MonitorIndexActivityStats struct {
 	StopCh   chan struct{}
 }
 
+type MonitorIndexActivityStatsBase struct {
+	URL     string // REST URL to monitor
+	Options indexActivityStatsOptions
+}
+
 // IndividualIndexActivityStats holds acitivity stats
 // ns each individual index.
 type individualIndexActivityStats struct {
@@ -216,8 +221,8 @@ func (h *IndexMonitoringHandler) ServeHTTP(
 		newOptions[k] = v
 	}
 	op := rest.RequestVariableLookup(req, "op")
-	intervalString := rest.RequestVariableLookup(req, "interval")
 	if op == "start" {
+		intervalString := rest.RequestVariableLookup(req, "interval")
 		newOptions["monitoring"] = "true"
 		newOptions["monitoringInterval"] = intervalString
 		h.mgr.SetOptions(newOptions)
@@ -252,10 +257,6 @@ func (h *IndexHibernationHandler) ServeHTTP(
 			status), http.StatusBadRequest)
 		return
 	}
-	/*
-		log.Printf("hibernate: mgr URL: %s,UUID: %s", h.mgr.BindHttp(),
-			h.mgr.UUID())
-	*/
 
 	indexDefs, indexDefsMap, err := h.mgr.GetIndexDefs(false)
 	if err != nil {
@@ -311,13 +312,14 @@ func InitMonitorIndexActivityStats(mgr *cbgt.Manager) (*MonitorIndexActivityStat
 			err.Error())
 	}
 
-	intervalString, ok := mgr.Options()["monitoringURL"]
+	intervalString, ok := mgr.Options()["monitoringInterval"]
 	var interval time.Duration
 	if ok && intervalString != "" {
 		interval, err = time.ParseDuration(intervalString)
 		if err != nil {
 			log.Printf("hibernate: unable to parse interval: %e, reverting to default", err)
 		}
+		log.Printf("interval duration: %s", interval.String())
 	}
 	indexActivityStatsSample := make(chan indexActivityDetails)
 	options := &indexActivityStatsOptions{
@@ -387,6 +389,7 @@ func (n *MonitorIndexActivityStats) pollURL(url string) {
 	for {
 		select {
 		case <-n.StopCh:
+			log.Printf("stopping poll url")
 			return
 
 		case t, ok := <-indexActivityStatsTicker.C:
@@ -399,6 +402,7 @@ func (n *MonitorIndexActivityStats) pollURL(url string) {
 }
 
 func (n *MonitorIndexActivityStats) Stop() {
+	n.StopCh <- struct{}{}
 	close(n.StopCh)
 }
 
@@ -456,6 +460,7 @@ func (n *MonitorIndexActivityStats) sample(url string, start time.Time) {
 	select {
 	case <-n.StopCh:
 		close(n.SampleCh) // close sample ch
+		return
 	case n.SampleCh <- finalIndexActivityStatsSample:
 	}
 }
