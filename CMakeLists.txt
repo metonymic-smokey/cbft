@@ -23,9 +23,28 @@ IF (BUILD_ENTERPRISE)
     SET (BUILD_TAG "cbftx")
 ENDIF(BUILD_ENTERPRISE)
 
+SET (LDFLAGS)
+IF (APPLE)
+  # On macOS, we must use -rpath to locate libraries
+  # TODO: Remove debug info stripping (-s) added to allow 1.7.6 to work on macOS
+  SET (LDFLAGS "-s -extldflags '-Wl,-rpath,@executable_path/../lib'")
+ENDIF ()
+
+IF (WIN32)
+   if("${MSVC_VERSION}" LESS 1910)
+      SET (LDFLAGS "${LDFLAGS} -linkmode internal")
+   endif()
+ENDIF ()
+
+SET(CGO_INCLUDE_DIRS "${sigar_SOURCE_DIR}/include;")
+SET(CGO_LIBRARY_DIRS "${sigar_BINARY_DIR}/src;")
+
 GoPrivateMod(MODULE cbftx)
 
 GoModBuild (TARGET cbft PACKAGE github.com/couchbase/cbft/cmd/cbft
+  CGO_INCLUDE_DIRS "${CGO_INCLUDE_DIRS}"
+  CGO_LIBRARY_DIRS "${CGO_LIBRARY_DIRS}"
+  LDFLAGS "${LDFLAGS}" 
   GOTAGS "${FTS_DEFAULT} ${BUILD_TAG}"
   INSTALL_PATH bin OUTPUT cbft
   GOVERSION 1.13.7)
@@ -34,6 +53,8 @@ GoModBuild (TARGET cbft-bleve PACKAGE github.com/couchbase/cbft/cmd/cbft-bleve
   GOTAGS "${FTS_DEFAULT} ${BUILD_TAG}"
   INSTALL_PATH bin
   GOVERSION 1.13.7)
+
+ADD_DEPENDENCIES(cbft sigar)
 
 # Build the UI and copy the files to the correct place
 ADD_SUBDIRECTORY(ns_server_static)
@@ -73,6 +94,6 @@ SET (GODEPS_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../godeps/src/github
 
 GoInstall(TARGET mossScope
   PACKAGE github.com/couchbase/mossScope
-  GOPATH "${CMAKE_SOURCE_DIR}/goproj" "${GODEPSDIR}"
+  GOPATH "${CMAKE_SOURCE_DIR}/goproj" "${GODEPSDIR}" 
   INSTALL_PATH bin OUTPUT mossScope
   GOVERSION 1.13.7)
