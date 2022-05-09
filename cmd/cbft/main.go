@@ -889,7 +889,7 @@ func (meh *mainHandlers) OnRefreshManagerOptions(options map[string]string) {
 			return
 		}
 		if ftsMemQuota, exists := options["ftsMemQuota"]; exists {
-			memoryLimit, err := getTotalMemStats()
+			memoryLimit, err := getMemoryLimit()
 			if err != nil {
 				log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
 				return

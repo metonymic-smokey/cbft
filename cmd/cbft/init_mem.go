@@ -14,12 +14,11 @@ import (
 	"time"
 
 	"github.com/couchbase/cbft"
-	log "github.com/couchbase/clog"
 )
 
 var (
-	ftsHerder              *appHerder
-	SIGAR_CGROUP_SUPPORTED uint8 = 1
+	ftsHerder            *appHerder
+	MemoryQuotaThreshold float32 = 0.75
 )
 
 func initMemOptions(options map[string]string) (err error) {
@@ -37,9 +36,11 @@ func initMemOptions(options map[string]string) (err error) {
 		}
 		memQuota = uint64(fmq)
 	}
-	memoryLimit, err := getTotalMemStats()
+	memoryLimit, err := getMemoryLimit()
 	if memoryLimit < memQuota {
-		memQuota = memoryLimit
+		memQuota = uint64(MemoryQuotaThreshold * float32(memoryLimit))
+		// multiplying by the threshold avoids the OOM error by having (1-threshold)*memoryLimit
+		// as a buffer.
 	}
 	// run the above check periodically to allow for memory limit updates?
 
@@ -84,32 +85,6 @@ func initMemOptions(options map[string]string) (err error) {
 	}
 
 	return nil
-}
-
-// Returns total memory based on cgroup limits, if possible.
-func getTotalMemStats() (uint64, error) {
-	stats, err := NewSystemStats()
-	if err != nil {
-		log.Printf("error getting new stats: %+v", err)
-		return 0, err
-	}
-	memTotal, err := stats.SystemTotalMem()
-	if err != nil {
-		log.Printf("error getting total mem: %+v", err)
-		return 0, err
-	}
-
-	cgroupInfo := stats.GetControlGroupInfo()
-	if cgroupInfo.Supported == SIGAR_CGROUP_SUPPORTED {
-		log.Printf("init_mem: cgroups are supported")
-		cGroupTotal := cgroupInfo.MemoryMax
-		// cGroupTotal is with-in valid system limits
-		if cGroupTotal > 0 && cGroupTotal <= memTotal {
-			return cGroupTotal, nil
-		}
-	}
-
-	return memTotal, nil
 }
 
 // defaultFTSApplicationFraction is default ratio for the
