@@ -888,6 +888,26 @@ func (meh *mainHandlers) OnRefreshManagerOptions(options map[string]string) {
 			log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
 			return
 		}
+		if ftsMemQuota, exists := options["ftsMemQuota"]; exists {
+			memoryLimit, err := getMemoryLimit()
+			if err != nil {
+				log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
+				return
+			}
+			fmq, err := strconv.Atoi(ftsMemQuota)
+			if err != nil {
+				log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
+				return
+			}
+			if uint64(fmq) > memoryLimit {
+				options["ftsMemQuota"] = strconv.FormatUint(memoryLimit, 10)
+				err = meh.mgr.SetOptions(options)
+				if err != nil {
+					log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
+					return
+				}
+			}
+		}
 	}
 }
 

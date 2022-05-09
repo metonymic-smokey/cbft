@@ -16,7 +16,10 @@ import (
 	"github.com/couchbase/cbft"
 )
 
-var ftsHerder *appHerder
+var (
+	ftsHerder            *appHerder
+	MemoryQuotaThreshold float32 = 0.75
+)
 
 func initMemOptions(options map[string]string) (err error) {
 	if options == nil {
@@ -33,6 +36,13 @@ func initMemOptions(options map[string]string) (err error) {
 		}
 		memQuota = uint64(fmq)
 	}
+	memoryLimit, err := getMemoryLimit()
+	if memoryLimit < memQuota {
+		memQuota = uint64(MemoryQuotaThreshold * float32(memoryLimit))
+		// multiplying by the threshold avoids the OOM error by having (1-threshold)*memoryLimit
+		// as a buffer.
+	}
+	// run the above check periodically to allow for memory limit updates?
 
 	var memCheckInterval time.Duration
 	v, exists = options["memCheckInterval"] // In Go duration format.
