@@ -625,6 +625,19 @@ func mainStart(cfg cbgt.Cfg, uuid string, tags []string, container string,
 
 	handle(prefix+"/api/conciseOptions", "GET", cbft.NewConciseOptions(mgr))
 
+	handle(prefix+"/api/v1/monitoring/{op}", "POST",
+		cbft.NewIndexMonitoringHandler(mgr))
+
+	handle(prefix+"/api/v1/monitoring/{op}/{interval}", "POST",
+		cbft.NewIndexMonitoringHandler(mgr))
+
+	handle(prefix+"/api/v1/index/{indexName}/hibernation/{status}", "POST",
+		cbft.NewIndexHibernationHandler(mgr, map[string]struct{}{
+			"hot":  struct{}{},
+			"warm": struct{}{},
+			"cold": struct{}{},
+		}))
+
 	router := exportMuxRoutesToHttprouter(muxrouter, options)
 
 	router.Handler("PUT", prefix+"/api/managerOptions",
@@ -644,7 +657,7 @@ func mainStart(cfg cbgt.Cfg, uuid string, tags []string, container string,
 		endpoint, handler := cbft.MeteringEndpointHandler(mgr)
 		if len(endpoint) > 0 && handler != nil {
 			router.Handler("GET", prefix+"/api"+endpoint,
-			cbft.NewAuthVersionHandler(mgr, nil, handler))
+				cbft.NewAuthVersionHandler(mgr, nil, handler))
 		}
 	}
 
@@ -898,12 +911,31 @@ type mainHandlers struct {
 	mgr *cbgt.Manager
 }
 
+var (
+	monitorIndexActivityStats = &cbft.MonitorIndexActivityStats{}
+)
+
 func (meh *mainHandlers) OnRefreshManagerOptions(options map[string]string) {
 	if meh.mgr != nil {
 		err := initBleveOptions(options)
 		if err != nil {
 			log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
 			return
+		}
+		if monitor, ok := meh.mgr.Options()["monitoring"]; ok {
+			if monitor == "true" {
+				// repopulated on each start
+				monitorIndexActivityStats, err = cbft.InitMonitorIndexActivityStats(meh.mgr)
+				if err != nil {
+					log.Printf("main: meh.OnRefreshManagerOptions, err: %v", err)
+					return
+				}
+				cbft.IndexHibernateProbe(meh.mgr, monitorIndexActivityStats)
+			} else if monitor == "false" {
+				if monitorIndexActivityStats.StopCh != nil {
+					monitorIndexActivityStats.Stop()
+				}
+			}
 		}
 	}
 }

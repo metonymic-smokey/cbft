@@ -794,6 +794,23 @@ func OnDeleteIndex(indexDef *cbgt.IndexDef) {
 	DropSourcePartitionSeqs(indexDef.SourceName, indexDef.SourceUUID)
 }
 
+func getHibernateStatusFromIndexParams(indexParams string) (int, error) {
+	var ip cbgt.IndexPrepParams
+	err := json.Unmarshal([]byte(indexParams), &ip)
+	if err != nil {
+		return 0,
+			fmt.Errorf("bleve: new index, json marshal"+
+				" err: %v", err)
+	}
+	indexParams = ip.Params
+	var hs rest.HibernateParam
+	err = json.Unmarshal([]byte(indexParams), &hs)
+	if err != nil {
+		return 0, err
+	}
+	return hs.HibernateStatus, nil
+}
+
 func parseIndexParams(indexParams string) (
 	bleveParams *BleveParams, kvConfig map[string]interface{},
 	bleveIndexType string, kvStoreName string, err error) {
