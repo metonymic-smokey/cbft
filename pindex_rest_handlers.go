@@ -75,7 +75,7 @@ func (h *AnalyzeDocHandler) ServeHTTP(
 
 func AnalyzeDoc(mgr *cbgt.Manager, indexName, indexUUID string,
 	req []byte, res io.Writer) error {
-	pindexes, _, _, err := mgr.CoveringPIndexesEx(
+	pindexes, _, _, _, err := mgr.CoveringPIndexesEx(
 		cbgt.CoveringPIndexesSpec{
 			IndexName:            indexName,
 			IndexUUID:            indexUUID,

@@ -65,24 +65,33 @@ func (s *SearchService) DocCount(ctx context.Context,
 		return &pb.DocCountResult{DocCount: 0}, fmt.Errorf("grpc_server: "+
 			"CountPIndex, no pindex, pindexName: %s", req.IndexName)
 	}
-	if pindex.Dest == nil {
-		return &pb.DocCountResult{DocCount: 0}, fmt.Errorf("grpc_server: "+
-			"CountPIndex, no pindex.Dest, pindexName: %s", req.IndexName)
-
-	}
-
-	if req.IndexUUID != "" && pindex.UUID != req.IndexUUID {
-		return &pb.DocCountResult{DocCount: 0}, fmt.Errorf("grpc_server: "+
-			"CountPIndex, wrong pindexUUID: %s, pindex.UUID: %s, pindexName: %s",
-			req.IndexUUID, pindex.UUID, req.IndexName)
-	}
-
-	count, err := pindex.Dest.Count(pindex, nil)
+	// add a check here, if pindex is from cold index, return count = 0,with no error
+	indexDef, _, err := s.mgr.GetIndexDef(req.IndexName, false)
 	if err != nil {
 		return &pb.DocCountResult{DocCount: 0}, fmt.Errorf("grpc_server: "+
-			"CountPIndex, pindexName: %s, req: %#v, err: %v",
-			req.IndexName, req, err)
+			"error getting index defs: %s", err.Error())
+	}
+	var count uint64
+	if indexDef.HibernateStatus != cbgt.Cold {
+		if pindex.Dest == nil {
+			return &pb.DocCountResult{DocCount: 0}, fmt.Errorf("grpc_server: "+
+				"CountPIndex, no pindex.Dest, pindexName: %s", req.IndexName)
 
+		}
+
+		if req.IndexUUID != "" && pindex.UUID != req.IndexUUID {
+			return &pb.DocCountResult{DocCount: 0}, fmt.Errorf("grpc_server: "+
+				"CountPIndex, wrong pindexUUID: %s, pindex.UUID: %s, pindexName: %s",
+				req.IndexUUID, pindex.UUID, req.IndexName)
+		}
+
+		count, err = pindex.Dest.Count(pindex, nil)
+		if err != nil {
+			return &pb.DocCountResult{DocCount: 0}, fmt.Errorf("grpc_server: "+
+				"CountPIndex, pindexName: %s, req: %#v, err: %v",
+				req.IndexName, req, err)
+
+		}
 	}
 
 	return &pb.DocCountResult{DocCount: int64(count)}, nil
@@ -256,6 +265,11 @@ func (s *SearchService) Search(req *pb.SearchRequest,
 		})
 
 		defer querySupervisor.DeleteEntry(id)
+	} else {
+		log.Printf("grpc_server: Updating QS on the sly for non coordinator node...")
+		// cannot use add entry since that's reserved for co-ordinating nodes
+		// but need to get around that and update QS
+		querySupervisor.indexAccessTimes[req.IndexName] = time.Now()
 	}
 
 	var searchResult *bleve.SearchResult
